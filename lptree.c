@@ -1036,6 +1036,181 @@ static TTree *newgrammar (lua_State *L, int arg) {
 
 /* }====================================================== */
 
+/*
+** {======================================================
+** Tree optimizer
+** =======================================================
+*/
+
+/* if tree is a pattern that starts with a char, returns it and store the
+** sibling node (if any) in charsibling, or NULL if there is no sibling.
+** If tree is a TChoice(TSeq, other), the function will search one level
+** deeper. In that case the 'other' tree will be stored in othertree,
+** otherwise it will be NULL.
+** if tree does not start with a char, return -1.
+** This function only works on fully right-associative trees (i.e. run
+** correctassociativity before) !
+*/
+static int firstchar(TTree *tree, TTree **charsibling, TTree **othertree) {
+  *othertree = NULL;
+  switch (tree->tag) {
+    case TChar:
+      *charsibling = NULL;
+      return tree->u.n;
+    case TChoice:
+      /* XXX: for now, this is the same as seq as we still honor the choice ordering
+       *      but I will add a flag later to drop it. */
+      if (sib1(tree)->tag == TSeq) {
+        *othertree = sib2(tree);
+        tree = sib1(tree);
+      }
+      /* fall through */
+    case TSeq:
+      /* we assume the tree is right-associative so if there is a char to find,
+       * it is on fist left node */
+      if (sib1(tree)->tag == TChar) {
+        *charsibling = sib2(tree);
+        return sib1(tree)->u.n;
+      }
+      /* fall through */
+    default:
+      /* other kind of leaf, give up */
+      return -1;
+  }
+}
+
+static TTree* merge_prefixes(TTree *t, TTree *out) {
+  switch (t->tag) {
+    case TChoice: {
+      /* check whether both patterns have the same start */
+      TTree *leftsib, *rightsib, *othertree;
+      int leftchar, rightchar;
+
+      leftchar = firstchar(sib1(t), &leftsib, &othertree);
+      assert(othertree == NULL); /* on right-associative tree, there should not be any other tree here */
+      rightchar = firstchar(sib2(t), &rightsib, &othertree);
+
+      if (leftchar >= 0 && leftchar == rightchar) {
+        /* same prefix: report choice on next node */
+        TTree *original_out = out;
+
+        if (othertree != NULL) {
+          /* we have some other unrelated choice here, keep it on top of the tree. */
+          out->tag = TChoice; /* we will finish that node later */
+          out = sib1(out);
+        }
+
+        /* TODO: there is another possible optimization here: if any (or both) of
+         *       siblings are NULL, the Seq/Choice node are useless */
+        out->tag = TSeq; out->u.ps = 2;
+        sib1(out)->tag = TChar;
+        sib1(out)->u.n = (byte)leftchar;
+        out = sib2(out);
+
+        out->tag = TChoice;
+        if (leftsib != NULL) {
+          TTree *next = merge_prefixes(leftsib, sib1(out));
+          out->u.ps = next - out;
+        } else {
+          sib1(out)->tag = TTrue;
+          out->u.ps = 2;
+        }
+
+        if (rightsib != NULL) {
+          out = merge_prefixes(rightsib, sib2(out));
+        } else {
+          sib2(out)->tag = TTrue;
+          out = sib2(out) + 1;
+        }
+
+        /* finish tree patching if necessary */
+        if (othertree != NULL) {
+          original_out->u.ps = out - original_out;
+          out = merge_prefixes(othertree, sib2(original_out));
+        }
+
+        return out;
+      }
+      /* fall through */
+    }
+    default:
+      /* just copy the node to the output tree */
+      memcpy(out, t, sizeof(TTree));
+      if (numsiblings[t->tag] >= 1) {
+        TTree *next = merge_prefixes(sib1(t), sib1(out));
+        if (numsiblings[t->tag] == 2) {
+          out->u.ps = next - out;
+          next = merge_prefixes(sib2(t), sib2(out));
+        }
+        return next;
+      }
+      return out + 1;
+  }
+  assert(0); /* unreachable */
+}
+
+/* simplified version of finalfix, only meant to fix right-associativity recursively. */
+static void correctassociativity_rec (TTree *t) {
+ tailcall:
+  if (t->tag == TSeq || t->tag == TChoice) {
+      correctassociativity(t);
+  }
+
+  switch (numsiblings[t->tag]) {
+    case 1: /* correctassociativity_rec(sib1(t)); */
+      t = sib1(t); goto tailcall;
+    case 2:
+      correctassociativity_rec(sib1(t));
+      t = sib2(t); goto tailcall;  /* correctassociativity_rec(L, postable, g, sib2(t)); */
+    default: assert(numsiblings[t->tag] == 0); break;
+  }
+}
+
+static int lp_optimize(lua_State *L) {
+  int size, i;
+  TTree *out;
+  TTree *tree = gettree(L, 1, &size);
+  /* the optimization step relies on right-associativity */
+  lua_getfenv(L, 1);  /* push 'ktable' (may be used by 'finalfix') */
+  finalfix(L, 0, NULL, tree);
+
+#if 0
+  fprintf(stderr, " ===  ORIGINAL  ===\n");
+  printtree(tree, 0);
+#endif
+
+  /* create our optimized output tree. We don't know size now, but with
+   * current set of optimizations it will be smaller or equal the the
+   * unoptimized one, so start with that.
+   * XXX: check that the size assumption stays valid when new optimization
+   * is added.
+   */
+  for (i=0; ; i++) {
+    TTree *next;
+    out = newtree(L, size);
+    next = merge_prefixes(tree, out);
+    correctassociativity_rec(out);
+#if 0
+    fprintf(stderr, " ===  PASS %d  ===\n", i+1);
+    printtree(out, 0);
+#endif
+
+    fprintf(stderr, "original=%d; optimized=%d\n", size, next - out);
+    if (next - out == size || i >= 500) {
+      /* tree size have not changed, assume no optimization occured. */
+      copyktable(L, 1); /* we still need to set the ktable of our optimized pattern */
+      fprintf(stderr, "Stop optimizations after %d iterations.\n", i+1);
+      return 1;
+    }
+
+    /* the optimized tree is our new base; drop the previous one */
+    tree = out; size = next - out;
+    lua_replace(L, -2);
+  }
+  assert(0);
+}
+
+/* }====================================================== */
 
 static Instruction *prepcompile (lua_State *L, Pattern *p, int idx) {
   lua_getfenv(L, idx);  /* push 'ktable' (may be used by 'finalfix') */
@@ -1187,6 +1362,7 @@ static struct luaL_Reg pattreg[] = {
   {"ptree", lp_printtree},
   {"pcode", lp_printcode},
   {"match", lp_match},
+  {"optimize", lp_optimize},
   {"B", lp_behind},
   {"V", lp_V},
   {"C", lp_simplecapture},
