@@ -52,7 +52,7 @@ static void printjmp (const Instruction *op, const Instruction *p) {
 }
 
 
-static void printinst (const Instruction *op, const Instruction *p) {
+void printinst (const Instruction *op, const Instruction *p) {
   const char *const names[] = {
     "any", "char", "set",
     "testany", "testchar", "testset",
