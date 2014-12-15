@@ -1131,6 +1131,18 @@ static TTree* merge_prefixes(TTree *t, TTree *out) {
 
         return out;
       }
+      /* swap child nodes in optimized tree if they are not sorted.
+       * FIXME: this really a poor-man solution as it requires potentially a large number of passes:
+       *        make a true sorting phase before passing optimization */
+      else if (leftchar >= 0 && rightchar >= 0 && leftchar > rightchar) {
+        TTree *next;
+        /*fprintf(stderr, "swap %c and %c\n", (byte)leftchar, (byte)rightchar);*/
+        memcpy(out, t, sizeof(TTree));
+        next = merge_prefixes(sib2(t), sib1(out));
+        out->u.ps = next - out;
+        next = merge_prefixes(sib1(t), sib2(out));
+        return next;
+      }
       /* fall through */
     }
     default:
