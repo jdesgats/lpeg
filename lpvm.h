@@ -16,6 +16,7 @@ typedef enum Opcode {
   ITestAny,  /* in no char, jump to 'offset' */
   ITestChar,  /* if char != aux, jump to 'offset' */
   ITestSet,  /* if char not in buff, jump to 'offset' */
+  ITestVector, /* if char is in buff, then jump to to associated dest; otherwise, jump to 'offset' */
   ISpan,  /* read a span of chars in buff */
   IBehind,  /* walk back 'aux' characters (fail if not possible) */
   IRet,  /* return from a rule */

@@ -109,6 +109,13 @@ typedef struct Charset {
 /* set 'b' bit in charset 'cs' */
 #define setchar(cs,b)   ((cs)[(b) >> 3] |= (1 << ((b) & 7)))
 
+#if defined(__GNUC__) || defined(__clang__)
+# define popcount(x) __builtin_popcount(x)
+#elif defined(_MSC_VER)
+# define popcount(x) __popcnt(x)
+#else
+# error "compiler not supported (popcnt support)"
+#endif
 
 /*
 ** in capture instructions, 'kind' of capture and its offset are

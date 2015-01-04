@@ -51,11 +51,23 @@ static void printjmp (const Instruction *op, const Instruction *p) {
   printf("-> %d", (int)(p + (p + 1)->offset - op));
 }
 
+static void printvjmp(const Instruction *op, const Instruction *p) {
+  int i, offset=0;
+  const byte *st = (p+1)->buff;
+  printf("\n");
+  for(i=0; i <= UCHAR_MAX; i++) {
+    if (testchar(st, i)) {
+      ++offset;
+      printf("  '%c' -> %d\n", i, p + (p + CHARSETINSTSIZE + offset)->offset - op);
+    }
+  }
+  printf("   *  -> %d",  p + (p + CHARSETINSTSIZE)->offset - op);
+}
 
 void printinst (const Instruction *op, const Instruction *p) {
   const char *const names[] = {
     "any", "char", "set",
-    "testany", "testchar", "testset",
+    "testany", "testchar", "testset", "testvector",
     "span", "behind",
     "ret", "end",
     "choice", "jmp", "call", "open_call",
@@ -70,6 +82,10 @@ void printinst (const Instruction *op, const Instruction *p) {
     }
     case ITestChar: {
       printf("'%c'", p->i.aux); printjmp(op, p);
+      break;
+    }
+    case ITestVector: {
+      printvjmp(op, p);
       break;
     }
     case IFullCapture: {

@@ -213,6 +213,30 @@ const char *match (lua_State *L, const char *o, const char *s, const char *e,
         else p += getoffset(p);
         continue;
       }
+      case ITestVector: {
+        const int c = (byte)*s;
+        int jumpoffset=0;
+        if (testchar((p+1)->buff, c) && s < e) {
+          int j;
+          const unsigned int* bitset = (const unsigned int*)((p+1)->buff);
+          for (j=0; j<(int)(CHARSETSIZE/sizeof(unsigned int)); j++) {
+            if (c / (int)(sizeof(unsigned int) * BITSPERCHAR) == j) {
+              /* last word, take only bits < c in offset calculation, plus
+                 c slot itself. We can't do it in one shift bacause we may
+                 end up shifting to word length, which is undefined in C. */
+              int mask = (1U << (c % (sizeof(unsigned int) * BITSPERCHAR))) - 1;
+              jumpoffset += 1 + popcount(bitset[j] & mask);
+              break;
+            } else {
+              jumpoffset += popcount(bitset[j]);
+            }
+          }
+          assert(jumpoffset > 0); /* 0 is the failure offset */
+        }
+        printf("take jump at offset %d\n", jumpoffset);
+        p += (p + CHARSETINSTSIZE + jumpoffset)->offset;
+        continue;
+      }
       case IBehind: {
         int n = p->i.aux;
         if (n > s - o) goto fail;
