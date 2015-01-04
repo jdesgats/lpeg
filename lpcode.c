@@ -722,75 +722,74 @@ static void codechoice (CompileState *compst, TTree *p1, TTree *p2, int opt,
 static int codevectorchoice(CompileState *compst, TTree *tree, int opt,
                              const Charset *fl) {
     int vector, offset=0, i;
-    Charset cs;
     TTree *t;
+    Charset firstcs, cs;
     union {
         TTree *tree;
         int jmp;
     } destinations[UCHAR_MAX+1];
 
     memset(destinations, 0, sizeof(destinations));
-    vector = addinstruction(compst, ITestVector, 0);
-
-    /* allocate vector bitset, we fill it with final values later. We need our own
-       Charset here because pointer on instruction buffer may move during recursive
-       code generation calls. */
     memset(&cs, 0, sizeof(cs));
+
+    vector = addinstruction(compst, ITestVector, 0);
     addcharset(compst, cs.cs);
     addinstruction(compst, (Opcode)0, 0); /* lookup failure destination */
 
-    /* compute all valid destinations in current choice, and allocate space
-       for later jump instructions */
-    for(t = tree; sib2(t)->tag == TChoice; t = sib2(t)) {
-        TTree *first = sib1(t)->tag == TSeq ? sib1(sib1(t)) : sib1(t);
-        switch(first->tag) {
-            case TChar:
-                assert(0 <= first->u.n && first->u.n <= UCHAR_MAX);
-                if (testchar(cs.cs, first->u.n)) return 0; /* redundant pattern */
-                destinations[first->u.n].tree = sib1(t);
-                setchar(cs.cs, first->u.n);
-                addinstruction(compst, (Opcode)0, 0);
-                break;
-            case TSet:
-                for (i=0; i<=UCHAR_MAX; i++) {
-                    if (testchar(treebuffer(first), i)) {
-                        if (testchar(cs.cs, first->u.n)) return 0; /* redundant pattern */
-                        destinations[i].tree = sib1(t);
-                        setchar(cs.cs, i);
-                        addinstruction(compst, (Opcode)0, 0);
-                    }
+    for (t = tree; t->tag == TChoice; t = sib2(t)) {
+        assert(sib1(t)->tag != TChoice);
+        memset(&firstcs, 0, sizeof(firstcs));
+        if (getfirst(sib1(t), fullset, &firstcs) == 0) {
+            for (i=0; i<=UCHAR_MAX; i++) {
+                if (testchar(firstcs.cs, i)) {
+                    if (testchar(cs.cs, i)) return 0; /* redundant pattern */
+                    destinations[i].tree = sib1(t);
+                    setchar(cs.cs, i);
+                    addinstruction(compst, (Opcode)0, 0);
                 }
-                break;
-            default: goto done;
-        }
+            }
+        } else return 0; /* TODO: it is possible to vectorize up to here and then fallback to regular codegen */
         offset++;
     }
+
+    /* process last node too */
+    memset(&firstcs, 0, sizeof(firstcs));
+    assert(t->tag != TChoice);
+    if (getfirst(t, fullset, &firstcs) == 0) {
+        for (i=0; i<=UCHAR_MAX; i++) {
+            if (testchar(firstcs.cs, i)) {
+                if (testchar(cs.cs, i)) return 0; /* redundant pattern */
+                destinations[i].tree = t;
+                setchar(cs.cs, i);
+                addinstruction(compst, (Opcode)0, 0);
+            }
+        }
+    } else return 0; /* TODO: see above */
 
     /* the ITestVector may not be always a good idea if the number of choices
        is small because the instruction is huge (~50 bytes) and quite heavy to
        process for the VM. */
     if (offset <= 0) return 0;
 
-done:
     /* install the final bitset */
     loopset(j, getinstr(compst, vector+1).buff[j] = cs.cs[j]);
+
     offset = 0;
     /* generate code for each possible branch */
     for(i=0; i<=UCHAR_MAX; i++) {
         if (destinations[i].tree != NULL) {
             ++offset;
             setvjmp(compst, vector, offset);
-            /* FIXME: make aware other codegen functions that tt can also be a ITestVector */
-            printf("codegen for %c at %d\n", i, gethere(compst));
             codegen(compst, destinations[i].tree, 0, vector, fl);
             destinations[i].jmp = addoffsetinst(compst, IJmp);
         } else {
             destinations[i].jmp = NOINST;
         }
     }
-    /* generate the fail branch */
+
+    /* for now, the only possible outcome of set lookup fail is general failure */
     setvjmp(compst, vector, 0);
-    codegen(compst, t, 1, NOINST, fullset);
+    addinstruction(compst, IFail, 0);
 
     /* finally, set all pending links to here */
     for(i=0; i<=UCHAR_MAX; i++) {
@@ -805,16 +804,7 @@ done:
 */
 static void optcodechoice(CompileState *compst, TTree *tree, int opt,
                           const Charset *fl) {
-    /* the vector optimization is only possible for sequence of choices
-       directly over distinct characters (no capture, or other fancy stuff).
-       Also it is efficient only beyond a certain number of consecutive
-       choices (as instuction is huge and quite heavyweight to process). */
-    /* TODO: it should be possible to push the optimization further by
-       reporting some opcodes (such as IOpen*, etc) after the jump */
-    /* TODO: merge this with codevectorchoice and revert back to original
-     *       position in case of failure in processing */
     int pos = gethere(compst);
-
     if (!codevectorchoice(compst, tree, opt, fl)) {
         compst->ncode = pos; /* reset instruction buffer */
         codechoice(compst, sib1(tree), sib2(tree), opt, fl);
