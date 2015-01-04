@@ -542,8 +542,11 @@ static void jumptohere (CompileState *compst, int instruction) {
 ** test dominating it
 */
 static void codechar (CompileState *compst, int c, int tt) {
-  if (tt >= 0 && getinstr(compst, tt).i.code == ITestChar &&
-                 getinstr(compst, tt).i.aux == c)
+  if (tt >= 0 && (
+        (getinstr(compst, tt).i.code == ITestChar &&
+         getinstr(compst, tt).i.aux == c) ||
+        (getinstr(compst, tt).i.code == ITestVector &&
+         testchar(getinstr(compst, tt+1).buff, c))))
     addinstruction(compst, IAny, 0);
   else
     addinstruction(compst, IChar, c);
