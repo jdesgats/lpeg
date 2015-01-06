@@ -421,8 +421,6 @@ int sizei (const Instruction *i) {
       for (j=0; j<(int)(CHARSETSIZE/sizeof(unsigned int)); j++) {
         jumps += popcount(bitset[j]);
       }
-      int final = jumps + CHARSETINSTSIZE + 1;
-      return final;
       return jumps + CHARSETINSTSIZE + 1;
     }
     default: return 1;
@@ -697,6 +695,7 @@ static void codechoice (CompileState *compst, TTree *p1, TTree *p2, int opt,
   }
 }
 
+
 #define setvjmp(compst, instr, slot) getinstr(compst, instr + CHARSETINSTSIZE + slot).offset = gethere(compst) - instr
 /*
 ** Vectorized choice; this will allow the VM to choose between multiple
@@ -721,7 +720,7 @@ static void codechoice (CompileState *compst, TTree *p1, TTree *p2, int opt,
 */
 static int codevectorchoice(CompileState *compst, TTree *tree, int opt,
                              const Charset *fl) {
-    int vector, offset=0, i;
+    int vector, offset=0, i, failpos, failjmp, failempty;
     TTree *t;
     Charset firstcs, cs;
     union {
@@ -739,7 +738,9 @@ static int codevectorchoice(CompileState *compst, TTree *tree, int opt,
     for (t = tree; t->tag == TChoice; t = sib2(t)) {
         assert(sib1(t)->tag != TChoice);
         memset(&firstcs, 0, sizeof(firstcs));
-        if (getfirst(sib1(t), fullset, &firstcs) == 0) {
+        /* In case of a fullset in node, do not abort the whole vectorization,
+           just stop here and use fallfack if the taken branch fail somehow. */
+        if (getfirst(sib1(t), fullset, &firstcs) == 0 && !cs_equal(firstcs.cs, fullset->cs)) {
             for (i=0; i<=UCHAR_MAX; i++) {
                 if (testchar(firstcs.cs, i)) {
                     if (testchar(cs.cs, i)) return 0; /* redundant pattern */
@@ -748,14 +749,14 @@ static int codevectorchoice(CompileState *compst, TTree *tree, int opt,
                     addinstruction(compst, (Opcode)0, 0);
                 }
             }
-        } else return 0; /* TODO: it is possible to vectorize up to here and then fallback to regular codegen */
+        } else goto generate; /* we can't vectorize anymore, run regular codegen from here */
         offset++;
     }
 
     /* process last node too */
     memset(&firstcs, 0, sizeof(firstcs));
     assert(t->tag != TChoice);
-    if (getfirst(t, fullset, &firstcs) == 0) {
+    if (getfirst(t, fullset, &firstcs) == 0 && !cs_equal(firstcs.cs, fullset->cs)) {
         for (i=0; i<=UCHAR_MAX; i++) {
             if (testchar(firstcs.cs, i)) {
                 if (testchar(cs.cs, i)) return 0; /* redundant pattern */
@@ -764,15 +765,33 @@ static int codevectorchoice(CompileState *compst, TTree *tree, int opt,
                 addinstruction(compst, (Opcode)0, 0);
             }
         }
-    } else return 0; /* TODO: see above */
+        t = NULL; /* no fallback, all cases are covered */
+    }
 
+generate:
     /* the ITestVector may not be always a good idea if the number of choices
        is small because the instruction is huge (~50 bytes) and quite heavy to
        process for the VM. */
-    if (offset <= 0) return 0;
+    /*XXX: bench it a bit more scientifically (this depends on CPU, compiler, ...) */
+    if (offset <= 7) return 0;
 
     /* install the final bitset */
     loopset(j, getinstr(compst, vector+1).buff[j] = cs.cs[j]);
+
+    /* the fallback is generated first only because we need the address
+       before generating the other branches: this avoids more address
+       patching later. */
+    setvjmp(compst, vector, 0);
+    if (t == NULL) {
+        failpos = addinstruction(compst, IFail, 0);
+        failjmp = NOINST;
+        failempty = 0;
+    } else {
+        failpos = gethere(compst);
+        codegen(compst, t, opt, NOINST, fl);
+        failjmp = addoffsetinst(compst, IJmp);
+        failempty = t->tag == TTrue;
+    }
 
     offset = 0;
     /* generate code for each possible branch */
@@ -780,18 +799,32 @@ static int codevectorchoice(CompileState *compst, TTree *tree, int opt,
         if (destinations[i].tree != NULL) {
             ++offset;
             setvjmp(compst, vector, offset);
-            codegen(compst, destinations[i].tree, 0, vector, fl);
-            destinations[i].jmp = addoffsetinst(compst, IJmp);
+            /* FIXME: WTF: si on met (t == NULL ||headfail(destinations[i].tree)), peephole fait une boucle inf !!! */
+            if (t == NULL || headfail(destinations[i].tree)) {
+                /* no possible fallback, IChoice is not necessary */
+                codegen(compst, destinations[i].tree, 0, vector, fl);
+                destinations[i].jmp = addoffsetinst(compst, IJmp);
+            }
+            else if (opt && failempty) {
+                /* p1? == IPartialCommit; p1 */
+                /* FIXME: what does it mean ??? */
+                jumptohere(compst, addoffsetinst(compst, IPartialCommit));
+                codegen(compst, destinations[i].tree, 1, NOINST, fullset);
+                destinations[i].jmp = addoffsetinst(compst, IJmp);
+            }
+            else {
+                int pchoice = addoffsetinst(compst, IChoice);
+                jumptothere(compst, pchoice, failpos);
+                codegen(compst, destinations[i].tree, failempty, vector, fl);
+                destinations[i].jmp = addoffsetinst(compst, ICommit);
+            }
         } else {
             destinations[i].jmp = NOINST;
         }
     }
 
-    /* for now, the only possible outcome of set lookup fail is general failure */
-    setvjmp(compst, vector, 0);
-    addinstruction(compst, IFail, 0);
-
     /* finally, set all pending links to here */
+    jumptohere(compst, failjmp);
     for(i=0; i<=UCHAR_MAX; i++) {
         jumptohere(compst, destinations[i].jmp);
     }

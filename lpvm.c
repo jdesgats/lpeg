@@ -233,7 +233,6 @@ const char *match (lua_State *L, const char *o, const char *s, const char *e,
           }
           assert(jumpoffset > 0); /* 0 is the failure offset */
         }
-        printf("take jump at offset %d\n", jumpoffset);
         p += (p + CHARSETINSTSIZE + jumpoffset)->offset;
         continue;
       }
