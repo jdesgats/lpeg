@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <string.h>
+#include <stdlib.h>
 
 
 #include "lua.h"
@@ -1045,6 +1046,7 @@ static TTree *newgrammar (lua_State *L, int arg) {
 typedef enum {
   TREEOPT_MERGE_PREFIX,  /* merge choices when the first char is the same */
   TREEOPT_REORDER_PATT,  /* reorder patterns in sequence of choices */
+  TREEOPT_FIX_OFFSETS,   /* fix relative offsets in calls */
   TREEOPT_LAST           /* sentinel */
 } TreeoptKind;
 
@@ -1058,6 +1060,11 @@ typedef struct {
   TTree *optim_base;        /* base address of optimized tree */
   void *data[TREEOPT_LAST]; /* free data for optimizers */
 } TreeoptCtx;
+
+typedef struct {
+  int orig;
+  int optim;
+} TreeoptOffset;
 
 typedef TTree* (*TreeoptVisitor)(TreeoptCtx *ctx, TTree *t, TTree *out);
 
@@ -1109,6 +1116,37 @@ static int firstchar(TTree *tree, TTree **charsibling, TTree **othertree) {
   }
 }
 
+/* fix relative offsets inside the tree that have been broken during the
+** various transformations. For this it needs a mapping from old offsets to
+** new ones. The array must be sorted by old offset ascending order.
+*/
+static int cmp_offsets(const void *x, const void *y) { return ((const TreeoptOffset*)x)->orig - ((const TreeoptOffset*)y)->orig; }
+
+static void fixoffsets(TreeoptCtx *ctx, TTree *t, int nrule) {
+ tailcall:
+  switch (t->tag) {
+    case TGrammar: return; /* sub-grammars are already fixed */
+    case TCall: {
+      TreeoptOffset key, *offset;
+      key.orig = t->u.ps;
+      offset = bsearch(&key, ctx->data[TREEOPT_FIX_OFFSETS], nrule, sizeof(TreeoptOffset), cmp_offsets);
+      assert(offset != NULL);
+      /* compute the relative offset */
+      t->u.ps = offset->optim - (t - ctx->optim_base);
+      break;
+    }
+  }
+
+  switch (numsiblings[t->tag]) {
+    case 1: /* fixoffsets(ctx, t, sib1(t)); */
+      t = sib1(t); goto tailcall;
+    case 2:
+      fixoffsets(ctx, sib1(t), nrule);
+      t = sib2(t); goto tailcall;  /* fixoffsets(ctx, t, sib2(t)); */
+    default: assert(numsiblings[t->tag] == 0); break;
+  }
+}
+
 /* simplified version of finalfix, only meant to fix right-associativity recursively. */
 static void correctassociativity_rec (TTree *t) {
  tailcall:
@@ -1121,7 +1159,7 @@ static void correctassociativity_rec (TTree *t) {
       t = sib1(t); goto tailcall;
     case 2:
       correctassociativity_rec(sib1(t));
-      t = sib2(t); goto tailcall;  /* correctassociativity_rec(L, postable, g, sib2(t)); */
+      t = sib2(t); goto tailcall;  /* correctassociativity_rec(sib2(t)); */
     default: assert(numsiblings[t->tag] == 0); break;
   }
 }
@@ -1203,12 +1241,50 @@ static TTree *choice_reorderer(TreeoptCtx *ctx, TTree *t, TTree *out) {
   return next;
 }
 
+/* optimization break relative offsets used by grammars. Re-fix them. */
+static TTree *grammar_fixer(TreeoptCtx *ctx, TTree *t, TTree *out) {
+  switch(t->tag) {
+    case TGrammar: {
+      /* keep mapping from old absolute offsets to new ones.
+         For now uses a static array, is a Lua table more efficient ? */
+      TreeoptOffset mapping[MAXRULES];
+      TTree *newout;
+      void *prevmapping = ctx->data[TREEOPT_FIX_OFFSETS];
+
+      memset(mapping, 0, sizeof(mapping));
+      ctx->data[TREEOPT_FIX_OFFSETS] = mapping;
+      memcpy(out, t, sizeof(TTree));
+      newout = treeopt_visitor(ctx, sib1(t), sib1(out));
+      fixoffsets(ctx, sib1(out), t->u.n);
+      ctx->data[TREEOPT_FIX_OFFSETS] = prevmapping;
+      return newout;
+    }
+    case TRule: {
+      /* insert entry in mapping */
+      TreeoptOffset *entry;
+      assert(ctx->data[TREEOPT_FIX_OFFSETS] != NULL);
+      entry = ((TreeoptOffset*)ctx->data[TREEOPT_FIX_OFFSETS]) + t->cap;
+      entry->orig = t - ctx->orig_base;
+      entry->optim = out - ctx->optim_base;
+      break; /* let the usual tree copy happen */
+    }
+    case TCall:
+      /* replace relative offset to absolute one; the final relative offset
+         will be fixed by fixoffsets. */
+      memcpy(out, t, sizeof(TTree));
+      out->u.ps = t + t->u.ps - ctx->orig_base;
+      return out + 1;
+  }
+  return NULL;
+}
+
 /* optimizer visitor table: each member of TreeoptKind must have its vistor
 ** here (in the same order of declaration)
 */
 static TreeoptVisitor treeopt_visitors[] = {
   prefix_merger,
   choice_reorderer,
+  grammar_fixer,
 };
 
 static TTree* treeopt_visitor(TreeoptCtx *ctx, TTree *t, TTree *out) {
@@ -1216,7 +1292,7 @@ static TTree* treeopt_visitor(TreeoptCtx *ctx, TTree *t, TTree *out) {
   for (i = 0; i < sizeof(treeopt_visitors) / sizeof(TreeoptVisitor); i++) {
     TTree *newout = treeopt_visitors[i](ctx, t, out);
     if (newout != NULL) {
-      ctx->hits++;
+      if (i != TREEOPT_FIX_OFFSETS) ctx->hits++;
       return newout;
     }
   }
