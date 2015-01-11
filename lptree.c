@@ -1042,6 +1042,36 @@ static TTree *newgrammar (lua_State *L, int arg) {
 ** =======================================================
 */
 
+typedef enum {
+  TREEOPT_MERGE_PREFIX,  /* merge choices when the first char is the same */
+  TREEOPT_REORDER_PATT,  /* reorder patterns in sequence of choices */
+  TREEOPT_LAST           /* sentinel */
+} TreeoptKind;
+
+#define treeopt_ison(flags, opt) ((flags & (1 << opt)) != 0)
+
+typedef struct {
+  lua_State *L;
+  int enabled_opts;         /* bitflag of active optimizations */
+  int hits;                 /* applied optimizations count */
+  TTree *orig_base;         /* base address of base tree */
+  TTree *optim_base;        /* base address of optimized tree */
+  void *data[TREEOPT_LAST]; /* free data for optimizers */
+} TreeoptCtx;
+
+typedef TTree* (*TreeoptVisitor)(TreeoptCtx *ctx, TTree *t, TTree *out);
+
+/* Node visitor. Must be called by optimizers to recurse optimization.
+** t is the current node in base tree, out points to the next free node
+** in optimized tree. The returned value is the next free node in output
+** tree after the generation.
+*/
+static TTree* treeopt_visitor(TreeoptCtx *ctx, TTree *t, TTree *out);
+
+/*
+** utility functions
+*/
+
 /* if tree is a pattern that starts with a char, returns it and store the
 ** sibling node (if any) in charsibling, or NULL if there is no sibling.
 ** If tree is a TChoice(TSeq, other), the function will search one level
@@ -1079,88 +1109,6 @@ static int firstchar(TTree *tree, TTree **charsibling, TTree **othertree) {
   }
 }
 
-static TTree* merge_prefixes(TTree *t, TTree *out) {
-  switch (t->tag) {
-    case TChoice: {
-      /* check whether both patterns have the same start */
-      TTree *leftsib, *rightsib, *othertree;
-      int leftchar, rightchar;
-
-      leftchar = firstchar(sib1(t), &leftsib, &othertree);
-      assert(othertree == NULL); /* on right-associative tree, there should not be any other tree here */
-      rightchar = firstchar(sib2(t), &rightsib, &othertree);
-
-      if (leftchar >= 0 && leftchar == rightchar) {
-        /* same prefix: report choice on next node */
-        TTree *original_out = out;
-
-        if (othertree != NULL) {
-          /* we have some other unrelated choice here, keep it on top of the tree. */
-          out->tag = TChoice; /* we will finish that node later */
-          out = sib1(out);
-        }
-
-        /* TODO: there is another possible optimization here: if any (or both) of
-         *       siblings are NULL, the Seq/Choice node are useless */
-        out->tag = TSeq; out->u.ps = 2;
-        sib1(out)->tag = TChar;
-        sib1(out)->u.n = (byte)leftchar;
-        out = sib2(out);
-
-        out->tag = TChoice;
-        if (leftsib != NULL) {
-          TTree *next = merge_prefixes(leftsib, sib1(out));
-          out->u.ps = next - out;
-        } else {
-          sib1(out)->tag = TTrue;
-          out->u.ps = 2;
-        }
-
-        if (rightsib != NULL) {
-          out = merge_prefixes(rightsib, sib2(out));
-        } else {
-          sib2(out)->tag = TTrue;
-          out = sib2(out) + 1;
-        }
-
-        /* finish tree patching if necessary */
-        if (othertree != NULL) {
-          original_out->u.ps = out - original_out;
-          out = merge_prefixes(othertree, sib2(original_out));
-        }
-
-        return out;
-      }
-      /* swap child nodes in optimized tree if they are not sorted.
-       * FIXME: this really a poor-man solution as it requires potentially a large number of passes:
-       *        make a true sorting phase before passing optimization */
-      else if (leftchar >= 0 && rightchar >= 0 && leftchar > rightchar) {
-        TTree *next;
-        /*fprintf(stderr, "swap %c and %c\n", (byte)leftchar, (byte)rightchar);*/
-        memcpy(out, t, sizeof(TTree));
-        next = merge_prefixes(sib2(t), sib1(out));
-        out->u.ps = next - out;
-        next = merge_prefixes(sib1(t), sib2(out));
-        return next;
-      }
-      /* fall through */
-    }
-    default:
-      /* just copy the node to the output tree */
-      memcpy(out, t, sizeof(TTree));
-      if (numsiblings[t->tag] >= 1) {
-        TTree *next = merge_prefixes(sib1(t), sib1(out));
-        if (numsiblings[t->tag] == 2) {
-          out->u.ps = next - out;
-          next = merge_prefixes(sib2(t), sib2(out));
-        }
-        return next;
-      }
-      return out + 1;
-  }
-  assert(0); /* unreachable */
-}
-
 /* simplified version of finalfix, only meant to fix right-associativity recursively. */
 static void correctassociativity_rec (TTree *t) {
  tailcall:
@@ -1178,10 +1126,119 @@ static void correctassociativity_rec (TTree *t) {
   }
 }
 
+/*
+** optimizers: they must either return the next free node where they
+** appy, or NULL when thet don't
+*/
+
+/* check whether both patterns have the same start */
+static TTree* prefix_merger(TreeoptCtx *ctx, TTree *t, TTree *out) {
+  TTree *leftsib, *rightsib, *othertree, *original_out = out;
+  int leftchar, rightchar;
+
+  if (t->tag != TChoice) return NULL;
+
+  leftchar = firstchar(sib1(t), &leftsib, &othertree);
+  assert(othertree == NULL); /* on right-associative tree, there should not be any other tree here */
+  rightchar = firstchar(sib2(t), &rightsib, &othertree);
+  if (leftchar < 0 || leftchar != rightchar) return NULL;
+
+  /* same prefix: report choice on next node */
+  if (othertree != NULL) {
+    /* we have some other unrelated choice here, keep it on top of the tree. */
+    out->tag = TChoice; /* we will finish that node later */
+    out = sib1(out);
+  }
+
+  /* TODO: there is another possible optimization here: if any (or both) of
+   *       siblings are NULL, the Seq/Choice node are useless */
+  out->tag = TSeq; out->u.ps = 2;
+  sib1(out)->tag = TChar;
+  sib1(out)->u.n = (byte)leftchar;
+  out = sib2(out);
+
+  out->tag = TChoice;
+  if (leftsib != NULL) {
+    TTree *next = treeopt_visitor(ctx, leftsib, sib1(out));
+    out->u.ps = next - out;
+  } else {
+    sib1(out)->tag = TTrue;
+    out->u.ps = 2;
+  }
+
+  if (rightsib != NULL) {
+    out = treeopt_visitor(ctx, rightsib, sib2(out));
+  } else {
+    sib2(out)->tag = TTrue;
+    out = sib2(out) + 1;
+  }
+
+  /* finish tree patching if necessary */
+  if (othertree != NULL) {
+    original_out->u.ps = out - original_out;
+    out = treeopt_visitor(ctx, othertree, sib2(original_out));
+  }
+
+  return out;
+}
+
+static TTree *choice_reorderer(TreeoptCtx *ctx, TTree *t, TTree *out) {
+  int leftchar, rightchar;
+  TTree *next;
+
+  if (t->tag != TChoice) return NULL;
+
+  /* XXX: this is redundant with prefix_merger */
+  /* here we only care about returned char, pass any TTree pointer for other return values */
+  leftchar = firstchar(sib1(t), &next, &next);
+  rightchar = firstchar(sib2(t), &next, &next);
+
+  if (leftchar < 0 || rightchar < 0 || leftchar <= rightchar) return NULL;
+
+  /*fprintf(stderr, "swap %c and %c\n", (byte)leftchar, (byte)rightchar);*/
+  memcpy(out, t, sizeof(TTree));
+  next = treeopt_visitor(ctx, sib2(t), sib1(out));
+  out->u.ps = next - out;
+  next = treeopt_visitor(ctx, sib1(t), sib2(out));
+  return next;
+}
+
+/* optimizer visitor table: each member of TreeoptKind must have its vistor
+** here (in the same order of declaration)
+*/
+static TreeoptVisitor treeopt_visitors[] = {
+  prefix_merger,
+  choice_reorderer,
+};
+
+static TTree* treeopt_visitor(TreeoptCtx *ctx, TTree *t, TTree *out) {
+  unsigned int i;
+  for (i = 0; i < sizeof(treeopt_visitors) / sizeof(TreeoptVisitor); i++) {
+    TTree *newout = treeopt_visitors[i](ctx, t, out);
+    if (newout != NULL) {
+      ctx->hits++;
+      return newout;
+    }
+  }
+
+  /* no match ? just copy the node and recurse */
+  memcpy(out, t, sizeof(TTree));
+  if (numsiblings[t->tag] >= 1) {
+    TTree *next = treeopt_visitor(ctx, sib1(t), sib1(out));
+    if (numsiblings[t->tag] == 2) {
+      out->u.ps = next - out;
+      next = treeopt_visitor(ctx, sib2(t), sib2(out));
+    }
+    return next;
+  }
+  return out + 1;
+}
+
 static int lp_optimize(lua_State *L) {
   int size, i;
   TTree *out;
   TTree *tree = gettree(L, 1, &size);
+  int enabled_opts = ~0; /* enable everything for now */
   /* the optimization step relies on right-associativity */
   lua_getfenv(L, 1);  /* push 'ktable' (may be used by 'finalfix') */
   finalfix(L, 0, NULL, tree);
@@ -1199,16 +1256,22 @@ static int lp_optimize(lua_State *L) {
    */
   for (i=0; ; i++) {
     TTree *next;
-    out = newtree(L, size);
-    next = merge_prefixes(tree, out);
+    TreeoptCtx ctx;
+    ctx.L = L;
+    ctx.enabled_opts = enabled_opts;
+    ctx.hits = 0;
+    ctx.orig_base = tree;
+    ctx.optim_base = out = newtree(L, size);
+
+    next = treeopt_visitor(&ctx, tree, out);
     correctassociativity_rec(out);
 #if 0
     fprintf(stderr, " ===  PASS %d  ===\n", i+1);
     printtree(out, 0);
 #endif
 
-    fprintf(stderr, "original=%d; optimized=%d\n", size, next - out);
-    if (next - out == size || i >= 500) {
+    fprintf(stderr, "original=%d; optimized=%d; hits=%d\n", size, (int)(next - out), ctx.hits);
+    if (ctx.hits == 0 || i >= 500) {
       /* tree size have not changed, assume no optimization occured. */
       copyktable(L, 1); /* we still need to set the ktable of our optimized pattern */
       fprintf(stderr, "Stop optimizations after %d iterations.\n", i+1);
