@@ -1164,6 +1164,10 @@ static void correctassociativity_rec (TTree *t) {
   }
 }
 
+static int node_slotwidth(TTree *t) {
+  return 1 + (t->tag == TSet ? bytes2slots(CHARSETSIZE) : 0);
+}
+
 /*
 ** optimizers: they must either return the next free node where they
 ** appy, or NULL when thet don't
@@ -1289,6 +1293,7 @@ static TreeoptVisitor treeopt_visitors[] = {
 
 static TTree* treeopt_visitor(TreeoptCtx *ctx, TTree *t, TTree *out) {
   unsigned int i;
+  int node_slots;
   for (i = 0; i < sizeof(treeopt_visitors) / sizeof(TreeoptVisitor); i++) {
     TTree *newout = treeopt_visitors[i](ctx, t, out);
     if (newout != NULL) {
@@ -1298,7 +1303,8 @@ static TTree* treeopt_visitor(TreeoptCtx *ctx, TTree *t, TTree *out) {
   }
 
   /* no match ? just copy the node and recurse */
-  memcpy(out, t, sizeof(TTree));
+  node_slots = node_slotwidth(t);
+  memcpy(out, t, node_slots * sizeof(TTree));
   if (numsiblings[t->tag] >= 1) {
     TTree *next = treeopt_visitor(ctx, sib1(t), sib1(out));
     if (numsiblings[t->tag] == 2) {
@@ -1307,7 +1313,7 @@ static TTree* treeopt_visitor(TreeoptCtx *ctx, TTree *t, TTree *out) {
     }
     return next;
   }
-  return out + 1;
+  return out + node_slots;
 }
 
 static int lp_optimize(lua_State *L) {
