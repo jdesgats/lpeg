@@ -1090,6 +1090,7 @@ static TTree* treeopt_visitor(TreeoptCtx *ctx, TTree *t, TTree *out);
 */
 static int firstchar(TTree *tree, TTree **charsibling, TTree **othertree) {
   *othertree = NULL;
+redo:
   switch (tree->tag) {
     case TChar:
       *charsibling = NULL;
@@ -1097,11 +1098,10 @@ static int firstchar(TTree *tree, TTree **charsibling, TTree **othertree) {
     case TChoice:
       /* XXX: for now, this is the same as seq as we still honor the choice ordering
        *      but I will add a flag later to drop it. */
-      if (sib1(tree)->tag == TSeq) {
-        *othertree = sib2(tree);
-        tree = sib1(tree);
-      }
-      /* fall through */
+      *othertree = sib2(tree);
+      tree = sib1(tree);
+      assert(tree->tag != TChoice); /* assume right-associativity */
+      goto redo;
     case TSeq:
       /* we assume the tree is right-associative so if there is a char to find,
        * it is on fist left node */
@@ -1224,24 +1224,37 @@ static TTree* prefix_merger(TreeoptCtx *ctx, TTree *t, TTree *out) {
   return out;
 }
 
+/* worst sorting method ever ! Still, it is simple and converges quickly enough
+   for now (even on huge trees). It you want to optimize something, look here ! */
 static TTree *choice_reorderer(TreeoptCtx *ctx, TTree *t, TTree *out) {
   int leftchar, rightchar;
-  TTree *next;
+  TTree *next, *other;
 
   if (t->tag != TChoice) return NULL;
 
   /* XXX: this is redundant with prefix_merger */
-  /* here we only care about returned char, pass any TTree pointer for other return values */
-  leftchar = firstchar(sib1(t), &next, &next);
-  rightchar = firstchar(sib2(t), &next, &next);
+  leftchar = firstchar(sib1(t), &next, &other);
+  rightchar = firstchar(sib2(t), &next, &other);
 
   if (leftchar < 0 || rightchar < 0 || leftchar <= rightchar) return NULL;
 
   /*fprintf(stderr, "swap %c and %c\n", (byte)leftchar, (byte)rightchar);*/
   memcpy(out, t, sizeof(TTree));
-  next = treeopt_visitor(ctx, sib2(t), sib1(out));
-  out->u.ps = next - out;
-  next = treeopt_visitor(ctx, sib1(t), sib2(out));
+  if (other == NULL) {
+    /* terminal choice: just swap the children */
+    next = treeopt_visitor(ctx, sib2(t), sib1(out));
+    out->u.ps = next - out;
+    next = treeopt_visitor(ctx, sib1(t), sib2(out));
+  } else {
+    /* non-terminal choice: swap first two alternatives, and leave the rest */
+    next = treeopt_visitor(ctx, sib1(sib2(t)), sib1(out));
+    out->u.ps = next - out;
+    out = next;
+    out->tag = TChoice;
+    next = treeopt_visitor(ctx, sib1(t), sib1(out));
+    out->u.ps = next - out;
+    next = treeopt_visitor(ctx, other, sib2(out));
+  }
   return next;
 }
 
