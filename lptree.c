@@ -1318,9 +1318,16 @@ static TTree* treeopt_visitor(TreeoptCtx *ctx, TTree *t, TTree *out) {
 
 static int lp_optimize(lua_State *L) {
   int size, i;
-  TTree *out;
+  TTree *buffers[2];
   TTree *tree = gettree(L, 1, &size);
   int enabled_opts = ~0; /* enable everything for now */
+  /* optimized buffers are usually smaller than the base one, in some rare
+     cases, they get a bit bigger, allocate some extra space in that case */
+  int buffer_size = size + size / 2;
+  int buffer_idx;
+
+  if (buffer_size < 128) buffer_size = 128;
+
   /* the optimization step relies on right-associativity */
   lua_getfenv(L, 1);  /* push 'ktable' (may be used by 'finalfix') */
   finalfix(L, 0, NULL, tree);
@@ -1330,39 +1337,40 @@ static int lp_optimize(lua_State *L) {
   printtree(tree, 0);
 #endif
 
-  /* create our optimized output tree. We don't know size now, but with
-   * current set of optimizations it will be smaller or equal the the
-   * unoptimized one, so start with that.
-   * XXX: check that the size assumption stays valid when new optimization
-   * is added.
-   */
+  /* we have a base buffer and an optimized one, switch buffers at each
+     optimization pass */
+  buffer_idx = lua_gettop(L) + 1;
+  buffers[0] = newtree(L, buffer_size);
+  buffers[1] = newtree(L, buffer_size);
+
+  /* initialize buffer with original tree for first pass */
+  memcpy(buffers[0], tree, size * sizeof(TTree*));
+
   for (i=0; ; i++) {
     TTree *next;
     TreeoptCtx ctx;
     ctx.L = L;
     ctx.enabled_opts = enabled_opts;
     ctx.hits = 0;
-    ctx.orig_base = tree;
-    ctx.optim_base = out = newtree(L, size);
+    ctx.orig_base = buffers[i % 2];
+    ctx.optim_base = buffers[(i+1) % 2];
 
-    next = treeopt_visitor(&ctx, tree, out);
-    correctassociativity_rec(out);
+    next = treeopt_visitor(&ctx, ctx.orig_base, ctx.optim_base);
+    correctassociativity_rec(ctx.optim_base);
 #if 0
     fprintf(stderr, " ===  PASS %d  ===\n", i+1);
     printtree(out, 0);
 #endif
 
-    fprintf(stderr, "original=%d; optimized=%d; hits=%d\n", size, (int)(next - out), ctx.hits);
+    fprintf(stderr, "original=%d; optimized=%d; hits=%d\n", size, (int)(next - ctx.optim_base), ctx.hits);
     if (ctx.hits == 0 || i >= 500) {
-      /* tree size have not changed, assume no optimization occured. */
+      lua_pushvalue(L, buffer_idx + (i+1) % 2);
       copyktable(L, 1); /* we still need to set the ktable of our optimized pattern */
       fprintf(stderr, "Stop optimizations after %d iterations.\n", i+1);
       return 1;
     }
 
-    /* the optimized tree is our new base; drop the previous one */
-    tree = out; size = next - out;
-    lua_replace(L, -2);
+    size = next - ctx.optim_base;
   }
   assert(0);
 }
