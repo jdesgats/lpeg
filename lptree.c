@@ -1333,6 +1333,7 @@ static int lp_optimize(lua_State *L) {
   int size, i;
   TTree *buffers[2];
   TTree *tree = gettree(L, 1, &size);
+  int maxpass = luaL_optinteger(L, 2, DEFAULT_OPT_PASSES);
   int enabled_opts = ~0; /* enable everything for now */
   /* optimized buffers are usually smaller than the base one, in some rare
      cases, they get a bit bigger, allocate some extra space in that case */
@@ -1375,8 +1376,8 @@ static int lp_optimize(lua_State *L) {
     printtree(out, 0);
 #endif
 
-    fprintf(stderr, "original=%d; optimized=%d; hits=%d\n", size, (int)(next - ctx.optim_base), ctx.hits);
-    if (ctx.hits == 0 || i >= 500) {
+    fprintf(stderr, "pass=%04d; original=%d; optimized=%d; hits=%d\n", i+1, size, (int)(next - ctx.optim_base), ctx.hits);
+    if (ctx.hits == 0 || i >= maxpass) {
       lua_pushvalue(L, buffer_idx + (i+1) % 2);
       copyktable(L, 1); /* we still need to set the ktable of our optimized pattern */
       fprintf(stderr, "Stop optimizations after %d iterations.\n", i+1);

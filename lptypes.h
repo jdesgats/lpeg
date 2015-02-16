@@ -81,6 +81,8 @@
 /* index, on Lua stack, for backtracking stack */
 #define stackidx(ptop)	((ptop) + 4)
 
+/* default maximum number of optimization passes */
+#define DEFAULT_OPT_PASSES 500
 
 
 typedef unsigned char byte;
