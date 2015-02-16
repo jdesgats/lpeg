@@ -1133,6 +1133,7 @@ static void fixoffsets(TreeoptCtx *ctx, TTree *t, int nrule) {
       assert(offset != NULL);
       /* compute the relative offset */
       t->u.ps = offset->optim - (t - ctx->optim_base);
+      assert(sib2(t)->tag == TRule);
       break;
     }
   }
@@ -1224,8 +1225,8 @@ static TTree* prefix_merger(TreeoptCtx *ctx, TTree *t, TTree *out) {
   return out;
 }
 
-/* worst sorting method ever ! Still, it is simple and converges quickly enough
-   for now (even on huge trees). It you want to optimize something, look here ! */
+/* FIXME: worst sorting method ever ! Still, it is simple and works for a PoC.
+ * It requires a huge number of passes to converge. It you want to optimize something, look here ! */
 static TTree *choice_reorderer(TreeoptCtx *ctx, TTree *t, TTree *out) {
   int leftchar, rightchar;
   TTree *next, *other;
@@ -1288,8 +1289,9 @@ static TTree *grammar_fixer(TreeoptCtx *ctx, TTree *t, TTree *out) {
     case TCall:
       /* replace relative offset to absolute one; the final relative offset
          will be fixed by fixoffsets. */
+      assert(sib2(t)->tag == TRule);
       memcpy(out, t, sizeof(TTree));
-      out->u.ps = t + t->u.ps - ctx->orig_base;
+      out->u.ps = sib2(t) - ctx->orig_base;
       return out + 1;
   }
   return NULL;
