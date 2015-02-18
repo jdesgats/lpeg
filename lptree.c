@@ -1113,6 +1113,7 @@ redo:
       /* fall through */
     default:
       /* other kind of leaf, give up */
+      *charsibling = NULL;
       return -1;
   }
 }
