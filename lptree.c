@@ -1259,7 +1259,6 @@ static int choice_reorderer(TreeoptCtx *ctx, TTree *t) {
 
   if (leftchar < 0 || rightchar < 0 || leftchar <= rightchar) return 0;
 
-  /*fprintf(stderr, "swap %c and %c\n", (byte)leftchar, (byte)rightchar);*/
   out = next_node(ctx, 1);
   memcpy(out, t, sizeof(TTree));
   if (other == NULL) {
@@ -1368,11 +1367,6 @@ static int lp_optimize(lua_State *L) {
   lua_getfenv(L, 1);  /* push 'ktable' (may be used by 'finalfix') */
   finalfix(L, 0, NULL, tree);
 
-#if 0
-  fprintf(stderr, " ===  ORIGINAL  ===\n");
-  printtree(tree, 0);
-#endif
-
   /* we have a base buffer and an optimized one, switch buffers at each
      optimization pass */
   buffer_idx = lua_gettop(L) + 1;
@@ -1394,16 +1388,13 @@ static int lp_optimize(lua_State *L) {
 
     treeopt_visitor(&ctx, ctx.orig_base);
     correctassociativity_rec(ctx.optim_base);
-#if 0
-    fprintf(stderr, " ===  PASS %d  ===\n", i+1);
-    printtree(out, 0);
-#endif
 
-    fprintf(stderr, "pass=%04d; original=%d; optimized=%d; hits=%d\n", i+1, size, ctx.optim_pos, ctx.hits);
+#if defined(DEBUG)
+    printf("pass=%04d; original=%d; optimized=%d; hits=%d\n", i+1, size, ctx.optim_pos, ctx.hits);
+#endif
     if (ctx.hits == 0 || i >= maxpass) {
       lua_pushvalue(L, buffer_idx + (i+1) % 2);
       copyktable(L, 1); /* we still need to set the ktable of our optimized pattern */
-      fprintf(stderr, "Stop optimizations after %d iterations.\n", i+1);
       return 1;
     }
 
