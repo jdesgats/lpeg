@@ -1,5 +1,9 @@
-This is a fork original LPEG library. It contains unstable modifications.
+This is a fork original LPeg library. It contains unstable modifications.
 If you search for original library, see [this page](http://www.inf.puc-rio.br/~roberto/lpeg/lpeg.html).
+
+This fork contains some experimental optimizations to the original LPeg
+library. It's a drop-in replacement and does not change pattern semantics,
+it just optimize them, on demand.
 
 # Introduction
 
@@ -15,10 +19,10 @@ collection of patches to transform patterns into more efficient forms by
 applying some rules pretty munch like the
 [Aho-Corasick algorithm](http://en.wikipedia.org/wiki/Aho%E2%80%93Corasick_string_matching_algorithm).
 For instance, the previous example is more efficient as
-`(P'ba' * (P'r' + P'z')) + P'foo'`. By merging the common prefix, LPEG virtual
+`(P'ba' * (P'r' + P'z')) + P'foo'`. By merging the common prefix, LPeg virtual
 machine can narrow string matching munch faster.
 
-There is also some optimization to the LPEG VM diriectly: the `ITestVector`
+There is also some optimization to the LPeg VM diriectly: the `ITestVector`
 has been added to test all alternatives in one go for the current character
 rather than each alternative separately.
 
@@ -40,6 +44,9 @@ opt_p = p:optimize()
 
 print(opt_p:match 'acc')
 ```
+
+The returned pattern is a regular LPeg pattern, that can still be used to build
+larger patterns (optimizations will be kept).
 
 The `optimize()` method takes an optional integer argument to set the limit of
 optimization passes. The default limit (500) is more than enough for most
