@@ -44,6 +44,16 @@ assert(p:match('aafoo') == 6)
 assert(p:match('aabar') == 6)
 assert(p:match('aafoozz') == 6)
 assert(p:match('aabarzz') == 6)
+
+-- this pattern caused number of issues with ITestVector
+-- * alternatives are not ordered
+-- * the final set has nothing after itself
+-- TODO: test that the code is not duplicated for each char in sets
+p = m.P'aa' + m.P'bb' + m.P'cc' + m.P'dd' + m.P'ee' + (m.P(1) - m.R'az')
+assert(p:match('aa') == 3)
+assert(p:match('ee') == 3)
+assert(p:match('A') == 2)
+
 print('now run LPeg test suite with optimizations turned on')
 do
   local realmatch = m.match

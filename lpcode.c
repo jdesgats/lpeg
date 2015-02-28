@@ -696,7 +696,7 @@ static void codechoice (CompileState *compst, TTree *p1, TTree *p2, int opt,
 }
 
 
-#define setvjmp(compst, instr, slot) getinstr(compst, instr + CHARSETINSTSIZE + slot).offset = gethere(compst) - instr
+#define getvjmpslot(compst, instr, slot) getinstr(compst, instr + CHARSETINSTSIZE + slot).offset
 /*
 ** Vectorized choice; this will allow the VM to choose between multiple
 ** characters in one go, without backtracking. If the choice cannot or should
@@ -718,15 +718,60 @@ static void codechoice (CompileState *compst, TTree *p1, TTree *p2, int opt,
 ** dest buffer at n-th slow where n is the number of set bits in bitset before
 ** tested char (including itself). See popcount.
 */
-static int codevectorchoice(CompileState *compst, TTree *tree, int opt,
+
+typedef struct {
+    enum { DEST_NONE=0, DEST_TREE, DEST_OFFSET, DEST_ALIAS } kind;
+    union {
+        TTree *tree; /* node for codegen (pass 1) */
+        int jmp;     /* final jump offset, for patching (pass 2) */
+        int alias;   /* aliased destination, for non unique sets (pass 2) */
+    } val;
+    int instr;       /* first generated instruction offset */
+} Vectordest;
+
+typedef enum { VECT_ABORT, VECT_STOP, VECT_CONTINUE } Vectstatus;
+
+static Vectstatus vectorchoice_checktree (CompileState *compst, TTree *tree,
+                                          Vectordest *destinations, Charset *cs) {
+    Charset firstcs;
+    /* in sets, the code is generated only once, other chars jump to the sanme
+       destination. */
+    int fisrt_char = -1, i;
+
+    assert(tree->tag != TChoice);
+    memset(&firstcs, 0, sizeof(firstcs));
+    /* In case of a fullset in node, do not abort the whole vectorization,
+       just stop here and use fallfack if the taken branch fail somehow. */
+    if (getfirst(tree, fullset, &firstcs) != 0 ||
+        cs_equal(firstcs.cs, fullset->cs)) {
+        /* we can't vectorize anymore, run regular codegen from here */
+        return VECT_STOP;
+    }
+
+    for (i=0; i<=UCHAR_MAX; i++) {
+        if (testchar(firstcs.cs, i)) {
+            if (testchar(cs->cs, i)) return VECT_ABORT; /* redundant pattern */
+            if (fisrt_char == -1) {
+                destinations[i].kind = DEST_TREE;
+                destinations[i].val.tree = tree;
+                fisrt_char = i;
+            } else {
+                destinations[i].kind = DEST_ALIAS;
+                destinations[i].val.alias = fisrt_char;
+            }
+            setchar(cs->cs, i);
+            addinstruction(compst, (Opcode)0, 0);
+        }
+    }
+    return VECT_CONTINUE;
+}
+
+static int codevectorchoice (CompileState *compst, TTree *tree, int opt,
                              const Charset *fl) {
     int vector, offset=0, i, failpos, failjmp, failempty;
     TTree *t;
-    Charset firstcs, cs;
-    union {
-        TTree *tree;
-        int jmp;
-    } destinations[UCHAR_MAX+1];
+    Charset cs;
+    Vectordest destinations[UCHAR_MAX+1];
 
     memset(destinations, 0, sizeof(destinations));
     memset(&cs, 0, sizeof(cs));
@@ -736,36 +781,17 @@ static int codevectorchoice(CompileState *compst, TTree *tree, int opt,
     addinstruction(compst, (Opcode)0, 0); /* lookup failure destination */
 
     for (t = tree; t->tag == TChoice; t = sib2(t)) {
-        assert(sib1(t)->tag != TChoice);
-        memset(&firstcs, 0, sizeof(firstcs));
-        /* In case of a fullset in node, do not abort the whole vectorization,
-           just stop here and use fallfack if the taken branch fail somehow. */
-        if (getfirst(sib1(t), fullset, &firstcs) == 0 && !cs_equal(firstcs.cs, fullset->cs)) {
-            for (i=0; i<=UCHAR_MAX; i++) {
-                if (testchar(firstcs.cs, i)) {
-                    if (testchar(cs.cs, i)) return 0; /* redundant pattern */
-                    destinations[i].tree = sib1(t);
-                    setchar(cs.cs, i);
-                    addinstruction(compst, (Opcode)0, 0);
-                }
-            }
-        } else goto generate; /* we can't vectorize anymore, run regular codegen from here */
-        offset++;
+        switch(vectorchoice_checktree(compst, sib1(t), destinations, &cs)) {
+        case VECT_ABORT: return 0;
+        case VECT_STOP: goto generate;
+        case VECT_CONTINUE: offset++; break;
+        }
     }
 
     /* process last node too */
-    memset(&firstcs, 0, sizeof(firstcs));
-    assert(t->tag != TChoice);
-    if (getfirst(t, fullset, &firstcs) == 0 && !cs_equal(firstcs.cs, fullset->cs)) {
-        for (i=0; i<=UCHAR_MAX; i++) {
-            if (testchar(firstcs.cs, i)) {
-                if (testchar(cs.cs, i)) return 0; /* redundant pattern */
-                destinations[i].tree = t;
-                setchar(cs.cs, i);
-                addinstruction(compst, (Opcode)0, 0);
-            }
-        }
-        t = NULL; /* no fallback, all cases are covered */
+    switch(vectorchoice_checktree(compst, t, destinations, &cs)) {
+    case VECT_ABORT: return 0;
+    default: offset++; break;
     }
 
 generate:
@@ -781,7 +807,7 @@ generate:
     /* the fallback is generated first only because we need the address
        before generating the other branches: this avoids more address
        patching later. */
-    setvjmp(compst, vector, 0);
+    getvjmpslot(compst, vector, 0) = gethere(compst) - vector;
     if (t == NULL) {
         failpos = addinstruction(compst, IFail, 0);
         failjmp = NOINST;
@@ -796,37 +822,54 @@ generate:
     offset = 0;
     /* generate code for each possible branch */
     for(i=0; i<=UCHAR_MAX; i++) {
-        if (destinations[i].tree != NULL) {
+        switch (destinations[i].kind) {
+        case DEST_NONE:
+            destinations[i].val.jmp = NOINST;
+            destinations[i].instr = NOINST;
+            break;
+        case DEST_TREE:
+            assert(destinations[i].val.tree != NULL);
             ++offset;
-            setvjmp(compst, vector, offset);
-            /* FIXME: WTF: si on met (t == NULL ||headfail(destinations[i].tree)), peephole fait une boucle inf !!! */
-            if (t == NULL || headfail(destinations[i].tree)) {
+            destinations[i].instr =
+                getvjmpslot(compst, vector, offset) =
+                gethere(compst) - vector;
+            if (t == NULL || headfail(destinations[i].val.tree)) {
                 /* no possible fallback, IChoice is not necessary */
-                codegen(compst, destinations[i].tree, 0, vector, fl);
-                destinations[i].jmp = addoffsetinst(compst, IJmp);
+                codegen(compst, destinations[i].val.tree, 0, vector, fl);
+                destinations[i].val.jmp = addoffsetinst(compst, IJmp);
             }
             else if (opt && failempty) {
                 /* p1? == IPartialCommit; p1 */
                 /* FIXME: what does it mean ??? */
                 jumptohere(compst, addoffsetinst(compst, IPartialCommit));
-                codegen(compst, destinations[i].tree, 1, NOINST, fullset);
-                destinations[i].jmp = addoffsetinst(compst, IJmp);
+                codegen(compst, destinations[i].val.tree, 1, NOINST, fullset);
+                destinations[i].val.jmp = addoffsetinst(compst, IJmp);
             }
             else {
                 int pchoice = addoffsetinst(compst, IChoice);
                 jumptothere(compst, pchoice, failpos);
-                codegen(compst, destinations[i].tree, failempty, vector, fl);
-                destinations[i].jmp = addoffsetinst(compst, ICommit);
+                codegen(compst, destinations[i].val.tree, failempty, vector, fl);
+                destinations[i].val.jmp = addoffsetinst(compst, ICommit);
             }
-        } else {
-            destinations[i].jmp = NOINST;
+            break;
+        case DEST_ALIAS:
+            assert(destinations[i].val.alias < i);
+            ++offset;
+            destinations[i].instr =
+                getvjmpslot(compst, vector, offset) =
+                destinations[destinations[i].val.alias].instr;
+            destinations[i].val.jmp = NOINST;
+            break;
+        default:
+            assert(0);
         }
+        destinations[i].kind = DEST_OFFSET;
     }
 
     /* finally, set all pending links to here */
     jumptohere(compst, failjmp);
     for(i=0; i<=UCHAR_MAX; i++) {
-        jumptohere(compst, destinations[i].jmp);
+        jumptohere(compst, destinations[i].val.jmp);
     }
 
     return 1;
