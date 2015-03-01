@@ -3,7 +3,9 @@ If you search for original library, see [this page](http://www.inf.puc-rio.br/~r
 
 This fork contains some experimental optimizations to the original LPeg
 library. It's a drop-in replacement and does not change pattern semantics,
-it just optimize them, on demand.
+it just optimize them, on demand. The optimization ratio can be
+[huge](http://mille337.net/index.php?d=2015/02/28/11/01/02-lets-optimize-lpeg---part-4-conclusion-and-benchmarks)
+(hundreds of times faster in most favorable cases).
 
 # Introduction
 
@@ -26,9 +28,13 @@ There is also some optimization to the LPeg VM diriectly: the `ITestVector`
 has been added to test all alternatives in one go for the current character
 rather than each alternative separately.
 
-This is currently a work in progress and is considered unstable. More
-documentation and benchmarks will come in the next few weeks. The optimization
-ratio depends on the kind of patterns, but it can be up to 500 times faster !
+This is currently a work in progress and is considered unstable. If you find a
+bug, or if optimization changes your pattern semantics an any way: please send
+a bug report.
+
+If you're interested in details about this work, you may want to read these
+[blog articles](http://mille337.net/index.php?d=2015/02/22/14/28/35-lets-optimize-lpeg---part-1-introduction)
+about the design and results of these optimizations.
 
 # Usage
 
