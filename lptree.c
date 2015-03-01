@@ -1361,7 +1361,6 @@ static int lp_optimize(lua_State *L) {
   /* optimized trees are usually smaller than the base one, so original size
      should be enough for storing the optimized tree. */
   int buffer_size = size;
-  int buffer_idx;
 
   /* the optimization step relies on right-associativity */
   lua_getfenv(L, 1);  /* push 'ktable' (may be used by 'finalfix') */
@@ -1369,7 +1368,6 @@ static int lp_optimize(lua_State *L) {
 
   /* we have a base buffer and an optimized one, switch buffers at each
      optimization pass */
-  buffer_idx = lua_gettop(L) + 1;
   buffers[0] = newtree(L, buffer_size);
   buffers[1] = newtree(L, buffer_size);
 
@@ -1393,7 +1391,10 @@ static int lp_optimize(lua_State *L) {
     printf("pass=%04d; original=%d; optimized=%d; hits=%d\n", i+1, size, ctx.optim_pos, ctx.hits);
 #endif
     if (ctx.hits == 0 || i >= maxpass) {
-      lua_pushvalue(L, buffer_idx + (i+1) % 2);
+      /* LPeg relies on lua_objlen to get pattern length, but our optimized
+         buffer may contain free space. */
+      TTree *finaltree = newtree(L, ctx.optim_pos);
+      memcpy(finaltree, ctx.optim_base, ctx.optim_pos * sizeof(TTree*));
       copyktable(L, 1); /* we still need to set the ktable of our optimized pattern */
       return 1;
     }
