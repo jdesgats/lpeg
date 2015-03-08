@@ -1138,13 +1138,15 @@ static void treeopt_visitor(TreeoptCtx *ctx, TTree *t);
 ** This function only works on fully right-associative trees (i.e. run
 ** correctassociativity before) !
 */
-static int firstchar(TTree *tree, TTree **charsibling, TTree **othertree) {
+static int firstchar(TTree *tree, Charset *cs, TTree **charsibling, TTree **othertree) {
   *othertree = NULL;
 redo:
   switch (tree->tag) {
     case TChar:
+    case TSet:
       *charsibling = NULL;
-      return tree->u.n;
+      tocharset(tree, cs);
+      return 1;
     case TChoice:
       /* XXX: for now, this is the same as seq as we still honor the choice ordering
        *      but I will add a flag later to drop it. */
@@ -1155,15 +1157,16 @@ redo:
     case TSeq:
       /* we assume the tree is right-associative so if there is a char to find,
        * it is on fist left node */
-      if (sib1(tree)->tag == TChar) {
+      if (sib1(tree)->tag == TChar || sib1(tree)->tag == TSet) {
         *charsibling = sib2(tree);
-        return sib1(tree)->u.n;
+        tocharset(sib1(tree), cs);
+        return 1;
       }
       /* fall through */
     default:
       /* other kind of leaf, give up */
       *charsibling = NULL;
-      return -1;
+      return 0;
   }
 }
 
@@ -1239,6 +1242,42 @@ static void set_sib2_to_here(TreeoptCtx *ctx, TTree *t) {
   t->u.ps = ctx->optim_pos - (t - ctx->optim_base);
 }
 
+static int cs_equal (const byte *cs1, const byte *cs2) {
+  loopset(i, if (cs1[i] != cs2[i]) return 0);
+  return 1;
+}
+
+static int cs_disjoint (const Charset *cs1, const Charset *cs2) {
+  loopset(i, if ((cs1->cs[i] & cs2->cs[i]) != 0) return 0;)
+  return 1;
+}
+
+static int cs_first (const Charset *cs) {
+  int c=0, i;
+  for (i=0; i < CHARSETSIZE-1; i++) {
+    if (cs->cs[i] == 0) { c += BITSPERCHAR; }
+    else { return c + __builtin_ctz(cs->cs[i]); }
+  }
+  return -1;
+}
+
+static int cs_last (const Charset *cs) {
+  int c=UCHAR_MAX, i;
+  for (i=CHARSETSIZE-1; i >= 0; i--) {
+    if (cs->cs[i] == 0) { c -= BITSPERCHAR; }
+    else { return c - __builtin_clz(cs->cs[i]) +
+        /* clz expects an integer, so it will have more leading zeroes */
+        ((sizeof(int) - sizeof(byte)) * BITSPERCHAR); }
+  }
+  return -1;
+}
+
+static int cs_count (const Charset *cs) {
+  int c=0;
+  loopset(i, c += popcount(cs->cs[i]));
+  return c;
+}
+
 /*
 ** optimizers: if optimization applies, the optimized nodes are generated and
 ** the return is non-zero. If the optimization does not apply, 0 is returned
@@ -1248,14 +1287,15 @@ static void set_sib2_to_here(TreeoptCtx *ctx, TTree *t) {
 /* check whether both patterns have the same start */
 static int prefix_merger(TreeoptCtx *ctx, TTree *t) {
   TTree *leftsib, *rightsib, *othertree, *out, *toplevel_choice=NULL;
-  int leftchar, rightchar;
+  Charset leftchars, rightchars;
 
   if (t->tag != TChoice) return 0;
 
-  leftchar = firstchar(sib1(t), &leftsib, &othertree);
+  if (!firstchar(sib1(t), &leftchars, &leftsib, &othertree)) return 0;
   assert(othertree == NULL); /* on right-associative tree, there should not be any other tree here */
-  rightchar = firstchar(sib2(t), &rightsib, &othertree);
-  if (leftchar < 0 || leftchar != rightchar) return 0;
+  if (!firstchar(sib2(t), &rightchars, &rightsib, &othertree)) return 0;
+  /* TODO: merge set intersection, and duplicate trees if necessary for other cases */
+  if (!cs_equal(leftchars.cs, rightchars.cs)) return 0;
 
   /* same prefix: report choice on next node */
   if (othertree != NULL) {
@@ -1266,10 +1306,18 @@ static int prefix_merger(TreeoptCtx *ctx, TTree *t) {
 
   /* TODO: there is another possible optimization here: if any (or both) of
    *       siblings are NULL, the Seq/Choice node are useless */
-  out = next_node(ctx, 3);
-  out->tag = TSeq; out->u.ps = 2;
-  sib1(out)->tag = TChar;
-  sib1(out)->u.n = (byte)leftchar;
+  if (cs_count(&leftchars) == 1) {
+    out = next_node(ctx, 3);
+    out->u.ps = 2;
+    sib1(out)->tag = TChar;
+    sib1(out)->u.n = (byte)cs_first(&leftchars);
+  } else {
+    out = next_node(ctx, 3 + bytes2slots(CHARSETSIZE));
+    out->u.ps = 2 + bytes2slots(CHARSETSIZE);
+    sib1(out)->tag = TSet;
+    loopset(i, treebuffer(sib1(out))[i] = leftchars.cs[i]);
+  }
+  out->tag = TSeq;
   sib2(out)->tag = TChoice;
 
   if (leftsib != NULL) {
@@ -1295,18 +1343,22 @@ static int prefix_merger(TreeoptCtx *ctx, TTree *t) {
 }
 
 /* FIXME: worst sorting method ever ! Still, it is simple and works for a PoC.
- * It requires a huge number of passes to converge. It you want to optimize something, look here ! */
+ * It requires a huge number of passes to converge. If you want to optimize something, look here ! */
 static int choice_reorderer(TreeoptCtx *ctx, TTree *t) {
-  int leftchar, rightchar;
+  Charset leftchars, rightchars;
   TTree *other, *out, *unused;
 
   if (t->tag != TChoice) return 0;
 
   /* XXX: this is redundant with prefix_merger */
-  leftchar = firstchar(sib1(t), &unused, &other);
-  rightchar = firstchar(sib2(t), &unused, &other);
+  if (!(firstchar(sib1(t), &leftchars, &unused, &other) &&
+        firstchar(sib2(t), &rightchars, &unused, &other))) return 0;
 
-  if (leftchar < 0 || rightchar < 0 || leftchar <= rightchar) return 0;
+  /* TODO: there is another case to cover: it sets are disjoints but not
+           ordered: they can be splited into disjoints and ordered sets
+           (it duplicate the associated node trees) */
+  if (cs_last(&leftchars) >= cs_first(&rightchars)) return 0;
+  if (!cs_disjoint(&leftchars, &rightchars)) return 0;
 
   out = next_node(ctx, 1);
   memcpy(out, t, sizeof(TTree));
