@@ -1,6 +1,6 @@
 #!/usr/bin/env lua5.1
 
--- $Id: test.lua,v 1.105 2014/12/12 17:00:39 roberto Exp $
+-- $Id: test.lua,v 1.106 2015/03/04 17:31:33 roberto Exp $
 
 -- require"strict"    -- just to be pedantic
 
@@ -386,6 +386,25 @@ checkerr("rule 'a' may be left recursive", m.match, p, "a")
 
 p = m.P { (m.P {m.P'abc'} + 'ayz') * m.V'y'; y = m.P'x' }
 assert(p:match('abcx') == 5 and p:match('ayzx') == 5 and not p:match'abc')
+
+
+do
+  -- large dynamic Cc
+  local lim = 2^16 - 1
+  local c = 0
+  local function seq (n) 
+    if n == 1 then c = c + 1; return m.Cc(c)
+    else
+      local m = math.floor(n / 2)
+      return seq(m) * seq(n - m)
+    end
+  end
+  p = m.Ct(seq(lim))
+  t = p:match('')
+  assert(t[lim] == lim)
+  checkerr("too many", function () p = p / print end)
+  checkerr("too many", seq, lim + 1)
+end
 
 
 -- tests for non-pattern as arguments to pattern functions

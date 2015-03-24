@@ -1,5 +1,5 @@
 /*
-** $Id: lptypes.h,v 1.10 2014/12/12 17:11:35 roberto Exp $
+** $Id: lptypes.h,v 1.11 2015/03/04 16:38:00 roberto Exp $
 ** LPeg - PEG pattern matching for Lua
 ** Copyright 2007-2014, Lua.org & PUC-Rio  (see 'lpeg.html' for license)
 ** written by Roberto Ierusalimschy
@@ -19,7 +19,7 @@
 #include "lua.h"
 
 
-#define VERSION         "0.12.1"
+#define VERSION         "0.12.2"
 
 
 #define PATTERN_T	"lpeg-pattern"
