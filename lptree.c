@@ -1421,7 +1421,7 @@ static int lp_optimize(lua_State *L) {
   buffers[1] = newtree(L, buffer_size);
 
   /* initialize buffer with original tree for first pass */
-  memcpy(buffers[0], tree, size * sizeof(TTree*));
+  memcpy(buffers[0], tree, size * sizeof(TTree));
 
   for (i=0; ; i++) {
     TreeoptCtx ctx;
