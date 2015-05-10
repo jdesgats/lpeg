@@ -19,7 +19,7 @@
 #include "lua.h"
 
 
-#define VERSION         "0.12.2"
+#define VERSION         "0.12.2-opt"
 
 
 #define PATTERN_T	"lpeg-pattern"
