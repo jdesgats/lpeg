@@ -54,6 +54,20 @@ assert(p:match('aa') == 3)
 assert(p:match('ee') == 3)
 assert(p:match('A') == 2)
 
+
+-- the 'bb' must not come before the 'bbbb' (the capture is not currently handled
+-- by the optimizer and should abort at that point)
+p = (m.P'cc' + m.P'aa' + m.C'bbbb' + m.P'bb'):optimize()
+assert(p:match('bbbb') == 'bbbb')
+assert(p:match('bb') == 3)
+
+-- Another tricky one: the 'A' must not be placed first
+p = (m.P'AB' + m.P'aa' + m.P'A' + m.P'AC'):optimize()
+assert(p:match('AB') == 3)
+assert(p:match('aa') == 3)
+assert(p:match('A') == 2)
+assert(p:match('AC') == 2)
+
 print('now run LPeg test suite with optimizations turned on')
 do
   local realmatch = m.match

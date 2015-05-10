@@ -1247,11 +1247,6 @@ static int cs_equal (const byte *cs1, const byte *cs2) {
   return 1;
 }
 
-static int cs_disjoint (const Charset *cs1, const Charset *cs2) {
-  loopset(i, if ((cs1->cs[i] & cs2->cs[i]) != 0) return 0;)
-  return 1;
-}
-
 static int cs_first (const Charset *cs) {
   int c=0, i;
   for (i=0; i < CHARSETSIZE-1; i++) {
@@ -1342,41 +1337,97 @@ static int prefix_merger(TreeoptCtx *ctx, TTree *t) {
   return 1;
 }
 
-/* FIXME: worst sorting method ever ! Still, it is simple and works for a PoC.
- * It requires a huge number of passes to converge. If you want to optimize something, look here ! */
+static void meminsert(void *dest, void *src, size_t n) {
+  /* TODO: do this without dynamic allocation (http://en.wikipedia.org/wiki/XOR_swap_algorithm) */
+  void *tmp = malloc(n);
+  assert(src > dest);
+  memcpy(tmp, src, n);
+  memmove((char *)dest + n, dest, (char *)src - (char *)dest);
+  memcpy(dest, tmp, n);
+  free(tmp);
+}
+
+/* Reorder a choice chain when possible to catch all merging opportunities */
 static int choice_reorderer(TreeoptCtx *ctx, TTree *t) {
+  int sorted;
   Charset leftchars, rightchars;
-  TTree *other, *out, *unused;
+  TTree *tree_root, *unused, *current;
 
-  if (t->tag != TChoice) return 0;
-
-  /* XXX: this is redundant with prefix_merger */
-  if (!(firstchar(sib1(t), &leftchars, &unused, &other) &&
-        firstchar(sib2(t), &rightchars, &unused, &other))) return 0;
-
-  /* TODO: there is another case to cover: it sets are disjoints but not
-           ordered: they can be splited into disjoints and ordered sets
-           (it duplicate the associated node trees) */
-  if (cs_last(&leftchars) >= cs_first(&rightchars)) return 0;
-  if (!cs_disjoint(&leftchars, &rightchars)) return 0;
-
-  out = next_node(ctx, 1);
-  memcpy(out, t, sizeof(TTree));
-  if (other == NULL) {
-    /* terminal choice: just swap the children */
-    treeopt_visitor(ctx, sib2(t));
-    set_sib2_to_here(ctx, out);
-    treeopt_visitor(ctx, sib1(t));
-  } else {
-    /* non-terminal choice: swap first two alternatives, and leave the rest */
-    treeopt_visitor(ctx, sib1(sib2(t)));
-    set_sib2_to_here(ctx, out);
-    out = next_node(ctx, 1);
-    out->tag = TChoice;
-    treeopt_visitor(ctx, sib1(t));
-    set_sib2_to_here(ctx, out);
-    treeopt_visitor(ctx, other);
+  /* first check whether the choice chain is sorted */
+  loopset(i, leftchars.cs[i] = 0);
+  for (current=t, sorted=1; current->tag == TChoice && sorted; current = sib2(current)) {
+    /* if node cannot be optimized, stop checking */
+    if (!firstchar(sib1(current), &rightchars,  &unused, &unused)) {
+        break;
+    }
+    sorted = cs_last(&leftchars) <= cs_first(&rightchars);
+    /* FIXME: this check must be applied evrywhere */
+    if (!sorted && cs_first(&leftchars) < cs_last(&rightchars)) {
+      /* TODO: this is a corner case: charsets in left and right nodes are
+      ** not totally ordered (e.g. S(acf) vs S(bde)). the sets should be
+      ** split in distinct ordered sets and subtrees duplicated */
+      return 0;
+    }
+    leftchars = rightchars;
   }
+  if (sorted) return 0;
+
+  /* choice chain must be sorted, build a sorted tree from it, starting from
+  ** the inital node, subsequent nodes will be inserted in tree at the right
+  ** position.
+  */
+  tree_root = next_node(ctx, 0);
+  treeopt_visitor(ctx, sib1(t));
+  for (current=sib2(t) ; ; current=sib2(current)) {
+    /* generate optimized tree for current node */
+    TTree *target, *source, *toopt;
+    int last_left;
+
+    toopt = (current->tag == TChoice) ? sib1(current) : current;
+    source = next_node(ctx, 1);
+    if (!firstchar(toopt, &leftchars, &unused, &unused)) {
+      /* can't optimize this one: abort this here */
+      treeopt_visitor(ctx, current);
+      for(target=tree_root; target->tag == TChoice; target=sib2(target)) ;
+      memmove(target + 1, target, (source - target) * sizeof(TTree));
+      target->tag = TChoice;
+      target->u.ps = source - target + 1;
+      return 1;
+    }
+
+    source->tag = TChoice;
+    treeopt_visitor(ctx, toopt);
+    set_sib2_to_here(ctx, source);
+    last_left = cs_last(&leftchars);
+
+    /* find correct place in optimized tree */
+    for(target=tree_root; target->tag == TChoice; target=sib2(target)) {
+      firstchar(sib1(target), &rightchars, &unused, &unused);
+      if (last_left < cs_first(&rightchars)) break;
+    }
+
+    if (target == source) {
+      continue; /* already placed */
+    } else if (target->tag != TChoice) {
+      /* the previous loop exited before computing charset */
+      firstchar(target, &rightchars, &unused, &unused);
+    }
+
+    /* move the optimized node */
+    if (last_left < cs_first(&rightchars)) {
+      /* buffer: |b|TChoice|a|  ==>  |TChoice|a|b|
+      ** swap |TChoice|a| with |b| to get the correct tree, offset is already correct */
+      meminsert(target, source, source->u.ps * sizeof(TTree));
+    } else {
+      /* buffer: |b|TChoice|c|  ==>  |TChoice|b|c|
+      ** move |b| one slot further and rebuild TChoice with the free node */
+      memmove(target + 1, target, (source - target) * sizeof(TTree));
+      target->tag = TChoice;
+      target->u.ps = source - target + 1;
+    }
+    if (current->tag != TChoice) break;
+  }
+
   return 1;
 }
 
